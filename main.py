@@ -1,0 +1,418 @@
+import pdb
+import numpy as np
+import torch
+import torch.utils.data as data
+import utils
+from options import *
+from config import *
+from train import *
+from test import *
+from model import *
+from search import *
+from tensorboard_logger import Logger
+from thumos_features import *
+from tqdm import tqdm
+
+
+def generate_pseudo_segment(config, net, test_loader, step):
+    with torch.no_grad():
+        net.eval()
+
+
+        final_res = {}
+        final_res['version'] = 'VERSION 1.3'
+        final_res['results'] = {}
+        final_res['external_data'] = {'used': True, 'details': 'Features from I3D Network'}
+
+        num_correct = 0.
+        num_total = 0.
+
+        load_iter = iter(test_loader)
+
+        for i in range(len(test_loader.dataset)):
+
+            _, _data, _label, _, _, vid_name, vid_num_seg, proposal_bbox, proposal_count_by_video, pseudo_instance_label, dynamic_segment_weights_cumsum = next(load_iter)
+
+            _data = _data.to(torch.device('cuda:1'))
+            _label = _label.to(torch.device('cuda:1'))
+
+            vid_num_seg = vid_num_seg[0].cpu().item()
+
+            num_segments = _data.shape[1]
+
+            vid_score, cas_sigmoid_fuse, _, _, _ = net(_data, vid_labels=_label, proposal_bbox=proposal_bbox,
+                                                    proposal_count_by_video=proposal_count_by_video)
+            vid_score = vid_score[0]
+            cas_sigmoid_fuse = cas_sigmoid_fuse[0]
+
+            agnostic_score = 1 - cas_sigmoid_fuse[:, :, -1].unsqueeze(2)
+            cas_sigmoid_fuse = cas_sigmoid_fuse[:, :, :-1]
+
+            label_np = _label.cpu().data.numpy()
+            score_np = vid_score[0].cpu().data.numpy()
+
+            pred_np = np.zeros_like(score_np)
+            pred_np[np.where(score_np < config.class_thresh)] = 0
+            pred_np[np.where(score_np >= config.class_thresh)] = 1
+
+            if pred_np.sum() == 0:
+                pred_np[np.argmax(score_np)] = 1
+
+            correct_pred = np.sum(label_np == pred_np, axis=1)
+
+            num_correct += np.sum((correct_pred == config.num_classes).astype(np.float32))
+            num_total += correct_pred.shape[0]
+
+            cas = cas_sigmoid_fuse
+
+            pred = np.where(score_np >= config.class_thresh)[0]
+
+            if len(pred) == 0:
+                pred = np.array([np.argmax(score_np)])
+
+            cas_pred = cas[0].cpu().numpy()[:, pred]
+            cas_pred = np.reshape(cas_pred, (num_segments, -1, 1))
+
+            cas_pred = utils.upgrade_resolution(cas_pred, config.scale)
+
+            proposal_dict = {}
+
+            agnostic_score = agnostic_score.expand((-1, -1, config.num_classes))
+            agnostic_score_np = agnostic_score[0].cpu().data.numpy()[:, pred]
+            agnostic_score_np = np.reshape(agnostic_score_np, (num_segments, -1, 1))
+            agnostic_score_np = utils.upgrade_resolution(agnostic_score_np, config.scale)
+
+            t_factor = float(16 * vid_num_seg) / (config.scale * num_segments * config.feature_fps)
+            vid_duration = float(16 * vid_num_seg) / config.feature_fps
+            for i in range(len(config.act_thresh_cas)):
+                cas_temp = cas_pred.copy()
+
+                zero_location = np.where(cas_temp[:, :, 0] < config.act_thresh_cas[i])
+                cas_temp[zero_location] = 0
+
+                seg_list = []
+                for c in range(len(pred)):
+                    pos = np.where(cas_temp[:, c, 0] > 0)
+                    seg_list.append(pos)
+
+                proposals = utils.get_proposal_oic(seg_list, cas_temp, pred, score_np, t_factor, dynamic_segment_weights_cumsum=dynamic_segment_weights_cumsum[0], vid_duration=vid_duration)
+
+                for i in range(len(proposals)):
+                    if len(proposals[i]) == 0:
+                        continue
+                    class_id = proposals[i][0][0]
+
+                    if class_id not in proposal_dict.keys():
+                        proposal_dict[class_id] = []
+
+                    proposal_dict[class_id] += proposals[i]
+
+            for i in range(len(config.act_thresh_agnostic)):
+                cas_temp = cas_pred.copy()
+
+                agnostic_score_np_temp = agnostic_score_np.copy()
+
+                zero_location = np.where(agnostic_score_np_temp[:, :, 0] < config.act_thresh_agnostic[i])
+                agnostic_score_np_temp[zero_location] = 0
+
+                seg_list = []
+                for c in range(len(pred)):
+                    pos = np.where(agnostic_score_np_temp[:, c, 0] > 0)
+                    seg_list.append(pos)
+
+                # proposals = utils.get_proposal_oic(seg_list, cas_temp, score_np, pred, config.scale, \
+                #                                    vid_num_seg, config.feature_fps, num_segments)
+                proposals = utils.get_proposal_oic(seg_list, cas_temp, pred, score_np, t_factor,
+                                                   dynamic_segment_weights_cumsum=dynamic_segment_weights_cumsum[0],
+                                                   vid_duration=vid_duration)
+
+                for i in range(len(proposals)):
+                    if len(proposals[i]) == 0:
+                        continue
+                    class_id = proposals[i][0][0]
+
+                    if class_id not in proposal_dict.keys():
+                        proposal_dict[class_id] = []
+
+                    proposal_dict[class_id] += proposals[i]
+
+            final_proposals = []
+            for class_id in proposal_dict.keys():
+                final_proposals.append(utils.nms(proposal_dict[class_id], thresh=0.7))
+
+            final_proposals = [final_proposals[i][j] for i in range(len(final_proposals)) for j in
+                               range(len(final_proposals[i]))]
+
+            final_res['results'][vid_name[0]] = utils.result2json(final_proposals)
+
+        test_acc = num_correct / num_total
+
+        json_path = os.path.join(config.output_path, "pseudo_proposals_step{}.json".format(step))
+        with open(json_path, 'w') as f:
+            json.dump(final_res, f)
+            f.close()
+
+        tIoU_thresh = np.linspace(0.1, 0.7, 7)
+        anet_detection = ANETdetection(config.gt_path, json_path,
+                                       subset='train', tiou_thresholds=tIoU_thresh,
+                                       verbose=False, check_status=False)
+        mAP, _ = anet_detection.evaluate()
+
+        # for i in range(tIoU_thresh.shape[0]):
+        #     print('acc/mAP@{:.1f}: {:.3f}'.format(tIoU_thresh[i], mAP[i]))
+
+
+        return final_res
+
+
+def generate_dynamic_segment_weights(args, pseudo_segment_dict, step=0):
+    dynamic_segment_weight_path = os.path.join(args.output_path, 'dynamic_segment_weights_pred_step{}'.format(step))
+    os.makedirs(dynamic_segment_weight_path, exist_ok=True)
+    for vid_name in pseudo_segment_dict['results']:
+        if 'test' in vid_name:
+            feature = np.load(os.path.join('dataset/THUMOS14/features/{}'.format('test'), vid_name+".npy"))
+        elif 'validation' in vid_name:
+            feature = np.load(os.path.join('dataset/THUMOS14/features/{}'.format('train'), vid_name+".npy"))
+        vid_len = feature.shape[0]
+
+        label_set = set()
+        if 'validation' in vid_name:
+            for ann in args.gt_dict[vid_name]["annotations"]:
+                label_set.add(ann['label'])
+        else:
+            for pred in pseudo_segment_dict['results'][vid_name]:
+                label_set.add(pred['label'])
+
+        prediction_list_all = []
+        for label in label_set:
+            prediction_list = []
+            for pred in pseudo_segment_dict['results'][vid_name]:
+                if pred['label'] == label:
+                    t_start = pred["segment"][0]
+                    t_end = pred["segment"][1]
+                    prediction_list.append([t_start, t_end, pred["score"], pred["label"]])
+            prediction_list = sorted(prediction_list, key=lambda k: k[2], reverse=True)
+
+            # select top Q% segments to filter out low-confidence segments
+            segment_score_list = []
+            for pred in prediction_list:
+                segment_score_list.append(pred[2])
+            segment_score = np.array(segment_score_list)
+            segment_score_cumsum = np.cumsum(segment_score)
+            if segment_score_cumsum.shape[0] > 0:
+                score_thres = np.max(segment_score_cumsum) * args.alpha
+            else:
+                score_thres = 0
+                assert(len(prediction_list) == 0), 'num_segments not equal to 0'
+            selected_proposal_count_by_video = np.where(segment_score_cumsum <= score_thres)[0].shape[0]
+            prediction_list_all += prediction_list[:selected_proposal_count_by_video]
+
+        time_to_index_factor = 25 / 16
+        proposal_list = []
+        for segment in prediction_list_all:
+            t_start = segment[0]
+            t_end = segment[1]
+            t_mid = (t_start + t_end) / 2
+            segment_duration = t_end - t_start
+            index_start = max(round((t_mid - (args.delta+0.5) * segment_duration) * time_to_index_factor), 0)
+            index_end = min(round((t_mid + (args.delta+0.5) * segment_duration) * time_to_index_factor), vid_len-1)
+            if index_start < index_end:
+                proposal_list.append([index_start, index_end])
+        proposal_list = sorted(proposal_list, key=lambda k: k[0], reverse=True)
+
+        upscale_duration = args.gamma * (2 * args.delta + 1)
+        dynamic_segment_weights = np.ones((vid_len,), dtype=float)
+        for proposal in proposal_list:
+            index_start = proposal[0]
+            index_end = proposal[1]
+            if (index_end - index_start + 1) <= float(upscale_duration):
+                for index in range(index_start, index_end+1):
+                    dynamic_segment_weights[index] = max(dynamic_segment_weights[index], min(float(upscale_duration) / (index_end - index_start + 1), float(upscale_duration)))
+
+        ### normalize the weights of fg segments ###
+        fg_pos = np.where(dynamic_segment_weights > 1.0)
+        fg_temp_list = np.array(fg_pos)[0]
+        if fg_temp_list.any():
+            grouped_fg_temp_list = utils.grouping(fg_temp_list)
+            for k in range(len(grouped_fg_temp_list)):
+                segment_score_sum = np.sum(dynamic_segment_weights[grouped_fg_temp_list[k]])
+                segment_score_sum_round = np.round(segment_score_sum)
+                dynamic_segment_weights[grouped_fg_temp_list[k]] = segment_score_sum_round * dynamic_segment_weights[grouped_fg_temp_list[k]] / segment_score_sum
+        np.save(os.path.join(dynamic_segment_weight_path, "{}.npy".format(vid_name)), dynamic_segment_weights)
+    return
+
+
+if __name__ == "__main__":
+    args = parse_args()
+    if args.debug:
+        pdb.set_trace()
+
+    config = Config(args)
+    worker_init_fn = None
+   
+    if config.seed >= 0:
+        utils.set_seed(config.seed)
+        worker_init_fn = np.random.seed(config.seed)
+
+    utils.save_config(config, os.path.join(config.output_path, "config.txt"))
+
+    model_list = []
+    optimizer_list = []
+    criterion_list = []
+    train_dataset_list = []
+    test_dataset_list = []
+    full_dataset_list = []
+
+    for step in range(config.num_steps+1):
+        if step == 0:
+            # For the first step
+            net = Model(config.len_feature, config.num_classes, config.r_act)
+            criterion = Total_loss(config.lambdas)
+            train_dataset = ThumosFeature(config, data_path=config.data_path, mode='train',
+                                          modal=config.modal, feature_fps=config.feature_fps,
+                                          num_segments=-1, sampling='random', step=step,
+                                          supervision='point', seed=config.seed)
+            test_dataset = ThumosFeature(config, data_path=config.data_path, mode='test',
+                                         modal=config.modal, feature_fps=config.feature_fps,
+                                         num_segments=-1, sampling='random', step=step,
+                                         supervision='point', seed=config.seed)
+            full_dataset = ThumosFeature(config, data_path=config.data_path, mode='full',
+                                         modal=config.modal, feature_fps=config.feature_fps,
+                                         num_segments=-1, sampling='random', step=step,
+                                         supervision='point', seed=config.seed)
+        else:
+            # For the following steps
+            net = Model_GAI(config.len_feature, config.num_classes, config.r_act)
+            criterion = Total_loss_Gai(config.lambdas)
+            train_dataset = ThumosFeature(config, data_path=config.data_path, mode='train',
+                                          modal=config.modal, feature_fps=config.feature_fps,
+                                          num_segments=-1, sampling='dynamic_random', step=step,
+                                          supervision='point', seed=config.seed)
+            test_dataset = ThumosFeature(config, data_path=config.data_path, mode='test',
+                                         modal=config.modal, feature_fps=config.feature_fps,
+                                         num_segments=-1, sampling='random', step=step,
+                                         supervision='point', seed=config.seed)
+            full_dataset = ThumosFeature(config, data_path=config.data_path, mode='full',
+                                         modal=config.modal, feature_fps=config.feature_fps,
+                                         num_segments=-1, sampling='random', step=step,
+                                         supervision='point', seed=config.seed)
+        device = torch.device("cuda:1")
+
+        net = net.to(device)
+        optimizer = torch.optim.Adam(net.parameters(), lr=config.lr[0],
+                                     betas=(0.9, 0.999), weight_decay=0.0005)
+        train_dataset_list.append(train_dataset)
+        test_dataset_list.append(test_dataset)
+        full_dataset_list.append(full_dataset)
+        model_list.append(net)
+        criterion_list.append(criterion)
+        optimizer_list.append(optimizer)
+
+    test_info = {"iter": [], "step": [], "test_acc": [],
+                 "average_mAP[0.1:0.7]": [], "average_mAP[0.1:0.5]": [], "average_mAP[0.3:0.7]": [],
+                 "mAP@0.1": [], "mAP@0.2": [], "mAP@0.3": [], "mAP@0.4": [],
+                 "mAP@0.5": [], "mAP@0.6": [], "mAP@0.7": []}
+
+    best_mAP = -1
+
+    logger = Logger(config.log_path)
+
+    step_iter = 0
+    net = model_list[step_iter]
+    optimizer = optimizer_list[step_iter]
+    criterion = criterion_list[step_iter]
+    train_loader = data.DataLoader(
+        train_dataset_list[step_iter],
+        batch_size=1, collate_fn=my_collate_fn,
+        shuffle=True, num_workers=config.num_workers,
+        worker_init_fn=worker_init_fn)
+    test_loader = data.DataLoader(
+        test_dataset_list[step_iter],
+        batch_size=1, collate_fn=my_collate_fn,
+        shuffle=True, num_workers=config.num_workers,
+        worker_init_fn=worker_init_fn)
+    full_loader = data.DataLoader(
+        full_dataset_list[step_iter],
+        batch_size=1, collate_fn=my_collate_fn,
+        shuffle=True, num_workers=config.num_workers,
+        worker_init_fn=worker_init_fn)
+    print(net, flush=True)
+
+    # final_res = {}
+    # final_res['version'] = 'VERSION 1.3'
+    # final_res['results'] = {}
+    # final_res['external_data'] = {'used': True, 'details': 'Features from I3D Network'}
+
+    for step in tqdm(
+            range(0, config.num_iters),
+            total=config.num_iters,
+            dynamic_ncols=True
+    ):
+        if 0 < step <= config.epochs_per_step * config.num_steps and step % config.epochs_per_step == 0:
+            step_iter = step // config.epochs_per_step
+            best_mAP = -1
+            with torch.no_grad():
+                train_loader_pseudo = data.DataLoader(
+                    ThumosFeature(config, data_path=config.data_path, mode='train',
+                                  modal=config.modal, feature_fps=config.feature_fps,
+                                  num_segments=-1, sampling='random', step=step,
+                                  supervision='point', seed=config.seed),
+                    batch_size=1, collate_fn=my_collate_fn,
+                    shuffle=True, num_workers=config.num_workers,
+                    worker_init_fn=worker_init_fn)
+                pseudo_segment_dict = generate_pseudo_segment(config, net, train_loader_pseudo, step=step_iter)
+                # pseudo_segment_dict = final_res
+                # generate dynamic segment weights according to the predicted pseudo_segment_dict
+                generate_dynamic_segment_weights(config, pseudo_segment_dict, step=step_iter)
+                # pass the generated pseudo_segment_dict into the dataset class to generate the proposal bounding box and pseudo label
+                train_dataset_list[step_iter].get_proposals(pseudo_segment_dict)
+                # test_dataset_list[step_iter].get_proposals(pseudo_segment_dict)
+                # full_dataset_list[step_iter].get_proposals(pseudo_segment_dict)
+
+                train_loader = data.DataLoader(
+                    train_dataset_list[step_iter],
+                    batch_size=1, collate_fn=my_collate_fn,
+                    shuffle=True, num_workers=config.num_workers,
+                    worker_init_fn=worker_init_fn)
+                test_loader = data.DataLoader(
+                    test_dataset_list[step_iter],
+                    batch_size=1, collate_fn=my_collate_fn,
+                    shuffle=True, num_workers=config.num_workers,
+                    worker_init_fn=worker_init_fn)
+                full_loader = data.DataLoader(
+                    full_dataset_list[step_iter],
+                    batch_size=1, collate_fn=my_collate_fn,
+                    shuffle=True, num_workers=config.num_workers,
+                    worker_init_fn=worker_init_fn)
+            net = model_list[step_iter]
+            optimizer = optimizer_list[step_iter]
+            criterion = criterion_list[step_iter]
+            print(net, flush=True)
+
+        if step > 0 and config.lr[step] != config.lr[step - 1]:
+            for param_group in optimizer.param_groups:
+                param_group["lr"] = config.lr[step]
+        if step % (len(train_loader) // config.batch_size) == 0:
+            loader_iter = iter(train_loader)
+
+        train(net, config, loader_iter, optimizer, criterion, logger, step)
+
+        if (step+1) % config.search_freq == 0:
+            optimal_sequence_search(net, config, logger, train_loader)
+
+        if (step+1) % 20 == 0:
+            test_res = test(net, config, logger, test_loader, test_info, step, step_iter)
+            if test_info["average_mAP[0.1:0.7]"][-1] > best_mAP:
+                # final_res = test_res
+                best_mAP = test_info["average_mAP[0.1:0.7]"][-1]
+
+                utils.save_best_record_thumos(test_info,
+                                              os.path.join(config.output_path,
+                                                           "best_record_seed_{}_Iter_{}.txt".format(config.seed, step_iter)))
+
+                torch.save(net.state_dict(), os.path.join(args.model_path, \
+                                                          "model_seed_{}_Iter_{}.pkl".format(config.seed, step_iter)))
+
+
+
+
