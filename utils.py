@@ -17,38 +17,94 @@ def upgrade_resolution(arr, scale):
     return up_scale
 
 
-# def get_proposal_oic(tList, wtcam, final_score, c_pred, scale, v_len, sampling_frames, num_segments, _lambda=0.25, gamma=0.2):
-#     t_factor = float(16 * v_len) / (scale * num_segments * sampling_frames)
-#     temp = []
-#     for i in range(len(tList)):
-#         c_temp = []
-#         temp_list = np.array(tList[i])[0]
-#         if temp_list.any():
-#             grouped_temp_list = grouping(temp_list)
-#             for j in range(len(grouped_temp_list)):
-#                 inner_score = np.mean(wtcam[grouped_temp_list[j], i, 0])
-#
-#                 len_proposal = len(grouped_temp_list[j])
-#                 outer_s = max(0, int(grouped_temp_list[j][0] - _lambda * len_proposal))
-#                 outer_e = min(int(wtcam.shape[0] - 1), int(grouped_temp_list[j][-1] + _lambda * len_proposal))
-#
-#                 outer_temp_list = list(range(outer_s, int(grouped_temp_list[j][0]))) + list(range(int(grouped_temp_list[j][-1] + 1), outer_e + 1))
-#
-#                 if len(outer_temp_list) == 0:
-#                     outer_score = 0
-#                 else:
-#                     outer_score = np.mean(wtcam[outer_temp_list, i, 0])
-#
-#                 c_score = inner_score - outer_score + gamma * final_score[c_pred[i]]
-#                 t_start = grouped_temp_list[j][0] * t_factor
-#                 t_end = (grouped_temp_list[j][-1] + 1) * t_factor
-#                 c_temp.append([c_pred[i], c_score, t_start, t_end])
-#             temp.append(c_temp)
-#     return temp
+def calculate_saliency_score(proposal_center, point_annotations, proposal_length):
+    """
+    计算提议的显著性得分
+    
+    Args:
+        proposal_center: 提议的中心点
+        point_annotations: 标注点的位置列表
+        proposal_length: 提议的长度
+    
+    Returns:
+        ssal: 显著性得分，范围 [0,1]
+    """
+    if point_annotations is None or len(point_annotations) == 0:
+        return 1.0  # 如果没有标注点，则默认为1.0
+        
+    # 计算提议中心到最近标注点的距离
+    distances = []
+    for point in point_annotations:
+        if point >= 0:  # 有效的标注点
+            distance = abs(proposal_center - point)
+            distances.append(distance)
+    
+    if not distances:  # 没有有效的标注点
+        return 1.0
+        
+    min_distance = min(distances)
+    ssal = 1.0 - 2.0 * min_distance / max(proposal_length, 1e-5)
+    return max(0.0, ssal)  # 确保得分非负
+
+
+def get_oic_score(cas_sigmoid_fuse, start, end, delta=0.25, point_annotations=None):
+    """
+    计算内外对比得分（OIC），现在结合了显著性得分
+    
+    Args:
+        cas_sigmoid_fuse: 分数序列
+        start: 起始位置
+        end: 结束位置
+        delta: 外部区域比例
+        point_annotations: 标注点位置列表
+    
+    Returns:
+        rep_score: 代表性得分 (OIC * Ssal)
+    """
+    length = end - start + 1
+
+    inner_score = torch.mean(cas_sigmoid_fuse[start:end+1])
+    
+    outer_s = max(0, int(start - delta * length))
+    outer_e = min(int(cas_sigmoid_fuse.shape[0] - 1), int(end + delta * length))
+
+    outer_seg = list(range(outer_s, start)) + list(range(end + 1, outer_e + 1))
+
+    if len(outer_seg) == 0:
+        outer_score = 0
+    else:
+        outer_score = torch.mean(cas_sigmoid_fuse[outer_seg])
+    
+    oic_score = inner_score - outer_score
+    
+    # 如果提供了标注点，计算显著性得分
+    if point_annotations is not None and len(point_annotations) > 0:
+        proposal_center = (start + end) / 2
+        ssal = calculate_saliency_score(proposal_center, point_annotations, length)
+        # 结合两个分数
+        rep_score = oic_score * ssal
+        return rep_score
+    else:
+        return oic_score
 
 
 def get_proposal_oic(tempseg_list, int_temp_scores, c_pred, c_pred_scores, t_factor, lamb=0.25, gamma=0.20,
-                     dynamic_segment_weights_cumsum=None, vid_duration=None):
+                     dynamic_segment_weights_cumsum=None, vid_duration=None, point_annotations=None):
+    """
+    生成基于内外对比和显著性校准的动作提议
+    
+    Args:
+        tempseg_list: 临时段列表
+        int_temp_scores: 临时分数
+        c_pred: 类别预测
+        c_pred_scores: 类别预测分数
+        t_factor: 时间因子
+        lamb: lambda参数
+        gamma: gamma参数
+        dynamic_segment_weights_cumsum: 动态段权重累积和
+        vid_duration: 视频时长
+        point_annotations: 标注点信息，格式为{类别索引: [点位置1, 点位置2, ...]}
+    """
     temp = []
     if not dynamic_segment_weights_cumsum is None:
         f_upsample = interpolate.interp1d(dynamic_segment_weights_cumsum / dynamic_segment_weights_cumsum[-1],
@@ -78,7 +134,21 @@ def get_proposal_oic(tempseg_list, int_temp_scores, c_pred, c_pred_scores, t_fac
                 else:
                     outer_score = np.mean(int_temp_scores[outer_temp_list, i])
 
-                c_score = inner_score - outer_score + gamma * c_pred_scores[c_pred[i]]
+                # 计算OIC分数
+                oic_score = inner_score - outer_score + gamma * c_pred_scores[c_pred[i]]
+                
+                # 计算显著性分数（如果有标注点）
+                ssal_score = 1.0  # 默认值
+                if point_annotations is not None and c_pred[i] in point_annotations:
+                    proposal_center = (grouped_temp_list[j][0] + grouped_temp_list[j][-1]) / 2
+                    proposal_length = grouped_temp_list[j][-1] - grouped_temp_list[j][0] + 1
+                    class_points = point_annotations[c_pred[i]]
+                    if len(class_points) > 0:
+                        ssal_score = calculate_saliency_score(proposal_center, class_points, proposal_length)
+                
+                # 结合OIC和显著性得分
+                c_score = oic_score * ssal_score
+                
                 t_start = (grouped_temp_list[j][0] + 0) * t_factor
                 t_end = (grouped_temp_list[j][-1] + 1) * t_factor
                 if not dynamic_segment_weights_cumsum is None:
@@ -195,24 +265,6 @@ def feature_sampling(features, start, end, num_divide):
         feature_lst[i] = features[sample_id]
 
     return feature_lst.mean(dim=0)
-
-
-def get_oic_score(cas_sigmoid_fuse, start, end, delta=0.25):
-    length = end - start + 1
-
-    inner_score = torch.mean(cas_sigmoid_fuse[start:end+1])
-    
-    outer_s = max(0, int(start - delta * length))
-    outer_e = min(int(cas_sigmoid_fuse.shape[0] - 1), int(end + delta * length))
-
-    outer_seg = list(range(outer_s, start)) + list(range(end + 1, outer_e + 1))
-
-    if len(outer_seg) == 0:
-        outer_score = 0
-    else:
-        outer_score = torch.mean(cas_sigmoid_fuse[outer_seg])
-
-    return inner_score - outer_score
 
 
 def select_seed(cas_sigmoid_fuse, point_anno):

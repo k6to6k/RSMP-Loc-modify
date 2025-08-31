@@ -1,7 +1,7 @@
 absl-py==1.4.0
 astor==0.8.1
 cachetools==5.3.0
-certifi
+certifi @ file:///croot/certifi_1671487769961/work/certifi
 charset-normalizer==3.0.1
 cycler==0.11.0
 fonttools==4.38.0
@@ -46,7 +46,7 @@ tensorflow==1.15.2
 tensorflow-estimator==1.15.1
 termcolor==2.2.0
 threadpoolctl==3.1.0
-# torch @ file:///media/hyone/My%20Passport/23-0210-UbuntuFile-backup/torch-1.8.1%2Bcu111-cp37-cp37m-linux_x86_64.whl
+torch @ file:///media/hyone/My%20Passport/23-0210-UbuntuFile-backup/torch-1.8.1%2Bcu111-cp37-cp37m-linux_x86_64.whl
 torchvision==0.9.1+cu111
 tqdm==4.31.1
 typing_extensions==4.4.0

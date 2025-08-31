@@ -140,8 +140,15 @@ class Total_loss(nn.Module):
                         start_act = range_idx[2*i] + 1
                         end_act = range_idx[2*i + 1]
 
-                        complete_score_act_1 = utils.get_oic_score(cas_sigmoid_fuse[0][b,:,c], start=start_act, end=end_act)
-                        complete_score_act_2 = utils.get_oic_score(cas_sigmoid_fuse[1][b,:,c], start=start_act, end=end_act)
+                        # 获取当前类别的标注点位置
+                        point_positions = []
+                        for t in range(point_anno.shape[1]):
+                            if point_anno[b, t, c] > 0:  # 如果该位置有标注点
+                                point_positions.append(t)
+                                
+                        # 结合显著性计算代表性得分
+                        complete_score_act_1 = utils.get_oic_score(cas_sigmoid_fuse[0][b,:,c], start=start_act, end=end_act, point_annotations=point_positions)
+                        complete_score_act_2 = utils.get_oic_score(cas_sigmoid_fuse[1][b,:,c], start=start_act, end=end_act, point_annotations=point_positions)
                         
                         loss_score_act_batch += 1 - complete_score_act_1 * 0.5 - complete_score_act_2 * 0.5
 
@@ -193,8 +200,15 @@ class Total_loss(nn.Module):
                         start_bkg = range_idx[2*i] + 1
                         end_bkg = range_idx[2*i + 1]
 
-                        complete_score_bkg_1 = utils.get_oic_score(1 - cas_sigmoid_fuse[0][b,:,c], start=start_bkg, end=end_bkg)
-                        complete_score_bkg_2 = utils.get_oic_score(1 - cas_sigmoid_fuse[1][b, :, c], start=start_bkg, end=end_bkg)
+                        # 获取当前类别的标注点位置（用于背景区域的显著性计算）
+                        point_positions = []
+                        for t in range(point_anno.shape[1]):
+                            if point_anno[b, t, c] > 0:  # 如果该位置有标注点
+                                point_positions.append(t)
+                                
+                        # 结合显著性计算背景区域的代表性得分
+                        complete_score_bkg_1 = utils.get_oic_score(1 - cas_sigmoid_fuse[0][b,:,c], start=start_bkg, end=end_bkg, point_annotations=point_positions)
+                        complete_score_bkg_2 = utils.get_oic_score(1 - cas_sigmoid_fuse[1][b, :, c], start=start_bkg, end=end_bkg, point_annotations=point_positions)
                         
                         loss_score_bkg_batch += 1 - complete_score_bkg_1 * 0.5 - complete_score_bkg_2 * 0.5
 
@@ -383,10 +397,17 @@ class Total_loss_Gai(nn.Module):
                         start_act = range_idx[2 * i] + 1
                         end_act = range_idx[2 * i + 1]
 
+                        # 获取当前类别的标注点位置
+                        point_positions = []
+                        for t in range(point_anno.shape[1]):
+                            if point_anno[b, t, c] > 0:  # 如果该位置有标注点
+                                point_positions.append(t)
+                                
+                        # 结合显著性计算代表性得分
                         complete_score_act_1 = utils.get_oic_score(cas_sigmoid_fuse[0][b, :, c], start=start_act,
-                                                                   end=end_act)
+                                                                   end=end_act, point_annotations=point_positions)
                         complete_score_act_2 = utils.get_oic_score(cas_sigmoid_fuse[1][b, :, c], start=start_act,
-                                                                   end=end_act)
+                                                                   end=end_act, point_annotations=point_positions)
 
                         loss_score_act_batch += 1 - complete_score_act_1 * 0.5 - complete_score_act_2 * 0.5
 
@@ -437,10 +458,17 @@ class Total_loss_Gai(nn.Module):
                         start_bkg = range_idx[2 * i] + 1
                         end_bkg = range_idx[2 * i + 1]
 
+                        # 获取当前类别的标注点位置（用于背景区域的显著性计算）
+                        point_positions = []
+                        for t in range(point_anno.shape[1]):
+                            if point_anno[b, t, c] > 0:  # 如果该位置有标注点
+                                point_positions.append(t)
+                                
+                        # 结合显著性计算背景区域的代表性得分
                         complete_score_bkg_1 = utils.get_oic_score(1 - cas_sigmoid_fuse[0][b, :, c], start=start_bkg,
-                                                                   end=end_bkg)
+                                                                   end=end_bkg, point_annotations=point_positions)
                         complete_score_bkg_2 = utils.get_oic_score(1 - cas_sigmoid_fuse[1][b, :, c], start=start_bkg,
-                                                                   end=end_bkg)
+                                                                   end=end_bkg, point_annotations=point_positions)
 
                         loss_score_bkg_batch += 1 - complete_score_bkg_1 * 0.5 - complete_score_bkg_2 * 0.5
 

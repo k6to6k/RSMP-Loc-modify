@@ -31,7 +31,7 @@ def generate_pseudo_segment(config, net, test_loader, step):
 
         for i in range(len(test_loader.dataset)):
 
-            _, _data, _label, _, _, vid_name, vid_num_seg, proposal_bbox, proposal_count_by_video, pseudo_instance_label, dynamic_segment_weights_cumsum = next(load_iter)
+            _, _data, _label, _point_anno, _, vid_name, vid_num_seg, proposal_bbox, proposal_count_by_video, pseudo_instance_label, dynamic_segment_weights_cumsum = next(load_iter)
 
             _data = _data.to(torch.device('cuda:1'))
             _label = _label.to(torch.device('cuda:1'))
@@ -95,7 +95,20 @@ def generate_pseudo_segment(config, net, test_loader, step):
                     pos = np.where(cas_temp[:, c, 0] > 0)
                     seg_list.append(pos)
 
-                proposals = utils.get_proposal_oic(seg_list, cas_temp, pred, score_np, t_factor, dynamic_segment_weights_cumsum=dynamic_segment_weights_cumsum[0], vid_duration=vid_duration)
+                # 提取当前视频的标注点信息
+                point_annotations = {}
+                if _point_anno.shape[0] > 0:
+                    _point_anno_np = _point_anno[0].cpu().numpy()
+                    for c_idx in range(_point_anno_np.shape[1]):
+                        point_positions = np.where(_point_anno_np[:,c_idx] > 0)[0].tolist()
+                        if len(point_positions) > 0:
+                            point_annotations[c_idx] = point_positions
+                
+                # 将标注点信息传递给get_proposal_oic函数
+                proposals = utils.get_proposal_oic(seg_list, cas_temp, pred, score_np, t_factor, 
+                                                   dynamic_segment_weights_cumsum=dynamic_segment_weights_cumsum[0], 
+                                                   vid_duration=vid_duration,
+                                                   point_annotations=point_annotations)
 
                 for i in range(len(proposals)):
                     if len(proposals[i]) == 0:
@@ -122,9 +135,12 @@ def generate_pseudo_segment(config, net, test_loader, step):
 
                 # proposals = utils.get_proposal_oic(seg_list, cas_temp, score_np, pred, config.scale, \
                 #                                    vid_num_seg, config.feature_fps, num_segments)
+                
+                # 使用相同的点标注信息
                 proposals = utils.get_proposal_oic(seg_list, cas_temp, pred, score_np, t_factor,
                                                    dynamic_segment_weights_cumsum=dynamic_segment_weights_cumsum[0],
-                                                   vid_duration=vid_duration)
+                                                   vid_duration=vid_duration,
+                                                   point_annotations=point_annotations)
 
                 for i in range(len(proposals)):
                     if len(proposals[i]) == 0:
