@@ -35,7 +35,9 @@ class Config(object):
         # ----------
         # self.epochs = 3000
         # self.epochs_per_step = 2000
-        self.epochs_per_step = 70
+        self.epochs_per_step = 50
+        # 增加内存清理频率参数
+        self.memory_cleanup_freq = 10  # 每10次迭代清理一次GPU缓存
         self.num_steps = args.num_step
         self.delta = 0.5
         self.alpha = 0.7

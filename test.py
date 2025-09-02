@@ -29,10 +29,10 @@ def test(net, config, logger, test_loader, test_info, step, step_iter, model_fil
 
             _, _data, _label, _, _, vid_name, vid_num_seg, proposal_bbox, proposal_count_by_video, pseudo_instance_label, dynamic_segment_weights_cumsum = next(load_iter)
 
-            _data = _data.to(torch.device('cuda:1'))
-            _label = _label.to(torch.device('cuda:1'))
-            proposal_bbox = proposal_bbox.to(torch.device('cuda:1'))
-            pseudo_instance_label = pseudo_instance_label.to(torch.device('cuda:1'))
+            _data = _data.to(torch.device('cuda:1'), non_blocking=True)
+            _label = _label.to(torch.device('cuda:1'), non_blocking=True)
+            proposal_bbox = proposal_bbox.to(torch.device('cuda:1'), non_blocking=True)
+            pseudo_instance_label = pseudo_instance_label.to(torch.device('cuda:1'), non_blocking=True)
 
 
             vid_num_seg = vid_num_seg[0].cpu().item()
@@ -95,8 +95,8 @@ def test(net, config, logger, test_loader, test_info, step, step_iter, model_fil
 
                 # proposals = utils.get_proposal_oic(seg_list, cas_temp, score_np, pred, config.scale, \
                 #                 vid_num_seg, config.feature_fps, num_segments)
-                proposals = utils.get_proposal_oic(seg_list, cas_temp, pred, score_np, t_factor,
-                                                   dynamic_segment_weights_cumsum=dynamic_segment_weights_cumsum[0],
+                proposals = utils.get_proposal_oic(seg_list, cas_temp, pred, score_np, t_factor, 
+                                                   dynamic_segment_weights_cumsum=dynamic_segment_weights_cumsum[0] if dynamic_segment_weights_cumsum is not None else None, 
                                                    vid_duration=vid_duration)
 
                 for i in range(len(proposals)):
@@ -125,7 +125,7 @@ def test(net, config, logger, test_loader, test_info, step, step_iter, model_fil
                 # proposals = utils.get_proposal_oic(seg_list, cas_temp, score_np, pred, config.scale, \
                 #                 vid_num_seg, config.feature_fps, num_segments)
                 proposals = utils.get_proposal_oic(seg_list, cas_temp, pred, score_np, t_factor,
-                                                   dynamic_segment_weights_cumsum=dynamic_segment_weights_cumsum[0],
+                                                   dynamic_segment_weights_cumsum=dynamic_segment_weights_cumsum[0] if dynamic_segment_weights_cumsum is not None else None,
                                                    vid_duration=vid_duration)
 
                 for i in range(len(proposals)):

@@ -80,62 +80,75 @@ class Total_loss(nn.Module):
         loss_score_bkg = 0
         loss_feat = 0
 
-        if len(stored_info['new_dense_anno'].shape) > 1:
-            new_dense_anno = stored_info['new_dense_anno'].to(torch.device('cuda:1'))
-            new_dense_anno = torch.cat((new_dense_anno, torch.zeros((new_dense_anno.shape[0], new_dense_anno.shape[1], 1)).to(torch.device('cuda:1'))), dim=2)
-                    
-            act_idx_diff = new_dense_anno[:,1:] - new_dense_anno[:,:-1]
-            loss_score_act = 0
-            loss_feat = 0
-            for b in range(new_dense_anno.shape[0]):
-                gt_classes = torch.nonzero(label[b]).squeeze(1)
-                act_count = 0
-                loss_score_act_batch = 0
-                loss_feat_batch = 0
+        # 批处理后, stored_info 是一个字典, 其值是列表
+        new_dense_anno_list = stored_info['new_dense_anno']
 
-                for c in gt_classes:
-                    range_idx = torch.nonzero(act_idx_diff[b,:,c]).squeeze(1)
-                    range_idx = range_idx.cpu().data.numpy().tolist()
-                    if type(range_idx) is not list:
-                        range_idx = [range_idx]
-                    if len(range_idx) == 0:
-                        continue
-                    # 排除两个边界存在动作实例c
-                    if act_idx_diff[b, range_idx[0], c] != 1:
-                        range_idx = [-1] + range_idx 
-                    if act_idx_diff[b, range_idx[-1], c] != -1:
-                        range_idx = range_idx + [act_idx_diff.shape[1] - 1]
+        # 检查列表中的第一个元素，以确定如何处理
+        if isinstance(new_dense_anno_list[0], torch.Tensor) and new_dense_anno_list[0].ndim > 1:
+            # 列表推导和张量操作需要逐个处理
+            for i in range(len(new_dense_anno_list)):
+                new_dense_anno = new_dense_anno_list[i].to(torch.device('cuda:1'))
+                
+                # 确保 new_dense_anno 是三维的
+                if new_dense_anno.ndim == 2:
+                    new_dense_anno = new_dense_anno.unsqueeze(0)
+
+                if new_dense_anno.ndim <= 1: continue
+
+                new_dense_anno = torch.cat((new_dense_anno, torch.zeros((new_dense_anno.shape[0], new_dense_anno.shape[1], 1)).to(torch.device('cuda:1'))), dim=2)
                         
-                    label_lst = []
-                    feature_lst = []
+                act_idx_diff = new_dense_anno[:,1:] - new_dense_anno[:,:-1]
+                loss_score_act = 0
+                loss_feat = 0
+                for b in range(new_dense_anno.shape[0]):
+                    gt_classes = torch.nonzero(label[b]).squeeze(1)
+                    act_count = 0
+                    loss_score_act_batch = 0
+                    loss_feat_batch = 0
 
-                    if range_idx[0] > -1:
-                        start_bkg = 0
-                        end_bkg = range_idx[0]
-                        bkg_len = end_bkg - start_bkg + 1
-
-                        label_lst.append(0)
-                        feature_lst.append(utils.feature_sampling(features[b], start_bkg, end_bkg + 1, self.sampling_size))
-
-                    for i in range(len(range_idx) // 2):
-                        if range_idx[2*i + 1] - range_idx[2*i] < 1:
+                    for c in gt_classes:
+                        range_idx = torch.nonzero(act_idx_diff[b,:,c]).squeeze(1)
+                        range_idx = range_idx.cpu().data.numpy().tolist()
+                        if type(range_idx) is not list:
+                            range_idx = [range_idx]
+                        if len(range_idx) == 0:
                             continue
+                        # 排除两个边界存在动作实例c
+                        if act_idx_diff[b, range_idx[0], c] != 1:
+                            range_idx = [-1] + range_idx 
+                        if act_idx_diff[b, range_idx[-1], c] != -1:
+                            range_idx = range_idx + [act_idx_diff.shape[1] - 1]
+                            
+                        label_lst = []
+                        feature_lst = []
 
-                        label_lst.append(1)
-                        feature_lst.append(utils.feature_sampling(features[b], range_idx[2*i] + 1, range_idx[2*i + 1] + 1, self.sampling_size))
-
-                        if range_idx[2*i + 1] != act_idx_diff.shape[1] - 1:
-                            start_bkg = range_idx[2*i + 1] + 1
-
-                            if i == (len(range_idx) // 2 - 1):
-                                end_bkg = act_idx_diff.shape[1] - 1
-                            else:
-                                end_bkg = range_idx[2*i + 2]
-
+                        if range_idx[0] > -1:
+                            start_bkg = 0
+                            end_bkg = range_idx[0]
                             bkg_len = end_bkg - start_bkg + 1
 
                             label_lst.append(0)
                             feature_lst.append(utils.feature_sampling(features[b], start_bkg, end_bkg + 1, self.sampling_size))
+
+                        for i in range(len(range_idx) // 2):
+                            if range_idx[2*i + 1] - range_idx[2*i] < 1:
+                                continue
+
+                            label_lst.append(1)
+                            feature_lst.append(utils.feature_sampling(features[b], range_idx[2*i] + 1, range_idx[2*i + 1] + 1, self.sampling_size))
+
+                            if range_idx[2*i + 1] != act_idx_diff.shape[1] - 1:
+                                start_bkg = range_idx[2*i + 1] + 1
+
+                                if i == (len(range_idx) // 2 - 1):
+                                    end_bkg = act_idx_diff.shape[1] - 1
+                                else:
+                                    end_bkg = range_idx[2*i + 2]
+
+                                bkg_len = end_bkg - start_bkg + 1
+
+                                label_lst.append(0)
+                                feature_lst.append(utils.feature_sampling(features[b], start_bkg, end_bkg + 1, self.sampling_size))
 
                         start_act = range_idx[2*i] + 1
                         end_act = range_idx[2*i + 1]
@@ -155,19 +168,17 @@ class Total_loss(nn.Module):
                         act_count += 1
 
                     if sum(label_lst) > 1:
-                        feature_lst = torch.stack(feature_lst, 0).clone()
-                        feature_lst = feature_lst / torch.norm(feature_lst, dim=1, p=2).unsqueeze(1)
-                        label_lst = torch.tensor(label_lst).to(torch.device('cuda:1')).float()
+                        feature_lst_tensor = torch.stack(feature_lst, 0).clone()
+                        feature_lst_tensor = feature_lst_tensor / torch.norm(feature_lst_tensor, dim=1, p=2).unsqueeze(1)
+                        label_lst_tensor = torch.tensor(label_lst).to(torch.device('cuda:1')).float()
 
-                        sim_matrix = torch.matmul(feature_lst, torch.transpose(feature_lst, 0, 1)) / self.tau
-
+                        sim_matrix = torch.matmul(feature_lst_tensor, torch.transpose(feature_lst_tensor, 0, 1)) / self.tau
                         sim_matrix = torch.exp(sim_matrix)
-                        
                         sim_matrix = sim_matrix.clone().fill_diagonal_(0).to(torch.device('cuda:1'))
 
-                        scores = (sim_matrix * label_lst.unsqueeze(1)).sum(dim=0) / sim_matrix.sum(dim=0)
-
-                        loss_feat_batch = (-label_lst * torch.log(scores)).sum() / label_lst.sum()
+                        scores = (sim_matrix * label_lst_tensor.unsqueeze(1)).sum(dim=0) / sim_matrix.sum(dim=0)
+                        
+                        loss_feat_batch = (-label_lst_tensor * torch.log(scores)).sum() / label_lst_tensor.sum()
 
                 if act_count > 0:
                     loss_score_act += loss_score_act_batch / act_count
@@ -333,51 +344,64 @@ class Total_loss_Gai(nn.Module):
         loss_score_bkg = 0
         loss_feat = 0
 
-        if len(stored_info['new_dense_anno'].shape) > 1:
-            new_dense_anno = stored_info['new_dense_anno'].to(torch.device('cuda:1'))
-            new_dense_anno = torch.cat(
-                (new_dense_anno, torch.zeros((new_dense_anno.shape[0], new_dense_anno.shape[1], 1)).to(torch.device('cuda:1'))), dim=2)
+        # 批处理后, stored_info 是一个字典, 其值是列表
+        new_dense_anno_list = stored_info['new_dense_anno']
 
-            act_idx_diff = new_dense_anno[:, 1:] - new_dense_anno[:, :-1]
-            loss_score_act = 0
-            loss_feat = 0
-            for b in range(new_dense_anno.shape[0]):
-                gt_classes = torch.nonzero(label[b]).squeeze(1)
-                act_count = 0
-                loss_score_act_batch = 0
-                loss_feat_batch = 0
+        # 检查列表中的第一个元素，以确定如何处理
+        if isinstance(new_dense_anno_list[0], torch.Tensor) and new_dense_anno_list[0].ndim > 1:
+            # 列表推导和张量操作需要逐个处理
+            for i in range(len(new_dense_anno_list)):
+                new_dense_anno = new_dense_anno_list[i].to(torch.device('cuda:1'))
+                
+                # 确保 new_dense_anno 是三维的
+                if new_dense_anno.ndim == 2:
+                    new_dense_anno = new_dense_anno.unsqueeze(0)
 
-                for c in gt_classes:
-                    range_idx = torch.nonzero(act_idx_diff[b, :, c]).squeeze(1)
-                    range_idx = range_idx.cpu().data.numpy().tolist()
-                    if type(range_idx) is not list:
-                        range_idx = [range_idx]
-                    if len(range_idx) == 0:
-                        continue
-                    if act_idx_diff[b, range_idx[0], c] != 1:
-                        range_idx = [-1] + range_idx
-                    if act_idx_diff[b, range_idx[-1], c] != -1:
-                        range_idx = range_idx + [act_idx_diff.shape[1] - 1]
+                if new_dense_anno.ndim <= 1: continue
+ 
+                new_dense_anno = torch.cat(
+                    (new_dense_anno, torch.zeros((new_dense_anno.shape[0], new_dense_anno.shape[1], 1)).to(torch.device('cuda:1'))), dim=2)
 
-                    label_lst = []
-                    feature_lst = []
+                act_idx_diff = new_dense_anno[:, 1:] - new_dense_anno[:, :-1]
+                loss_score_act = 0
+                loss_feat = 0
+                for b in range(new_dense_anno.shape[0]):
+                    gt_classes = torch.nonzero(label[b]).squeeze(1)
+                    act_count = 0
+                    loss_score_act_batch = 0
+                    loss_feat_batch = 0
 
-                    if range_idx[0] > -1:
-                        start_bkg = 0
-                        end_bkg = range_idx[0]
-                        bkg_len = end_bkg - start_bkg + 1
-
-                        label_lst.append(0)
-                        feature_lst.append(
-                            utils.feature_sampling(features[b], start_bkg, end_bkg + 1, self.sampling_size))
-
-                    for i in range(len(range_idx) // 2):
-                        if range_idx[2 * i + 1] - range_idx[2 * i] < 1:
+                    for c in gt_classes:
+                        range_idx = torch.nonzero(act_idx_diff[b, :, c]).squeeze(1)
+                        range_idx = range_idx.cpu().data.numpy().tolist()
+                        if type(range_idx) is not list:
+                            range_idx = [range_idx]
+                        if len(range_idx) == 0:
                             continue
+                        if act_idx_diff[b, range_idx[0], c] != 1:
+                            range_idx = [-1] + range_idx
+                        if act_idx_diff[b, range_idx[-1], c] != -1:
+                            range_idx = range_idx + [act_idx_diff.shape[1] - 1]
 
-                        label_lst.append(1)
-                        feature_lst.append(
-                            utils.feature_sampling(features[b], range_idx[2 * i] + 1, range_idx[2 * i + 1] + 1,
+                        label_lst = []
+                        feature_lst = []
+
+                        if range_idx[0] > -1:
+                            start_bkg = 0
+                            end_bkg = range_idx[0]
+                            bkg_len = end_bkg - start_bkg + 1
+
+                            label_lst.append(0)
+                            feature_lst.append(
+                                utils.feature_sampling(features[b], start_bkg, end_bkg + 1, self.sampling_size))
+
+                        for i in range(len(range_idx) // 2):
+                            if range_idx[2 * i + 1] - range_idx[2 * i] < 1:
+                                continue
+
+                            label_lst.append(1)
+                            feature_lst.append(
+                                utils.feature_sampling(features[b], range_idx[2 * i] + 1, range_idx[2 * i + 1] + 1,
                                                    self.sampling_size))
 
                         if range_idx[2 * i + 1] != act_idx_diff.shape[1] - 1:
@@ -414,19 +438,15 @@ class Total_loss_Gai(nn.Module):
                         act_count += 1
 
                     if sum(label_lst) > 1:
-                        feature_lst = torch.stack(feature_lst, 0).clone()
-                        feature_lst = feature_lst / torch.norm(feature_lst, dim=1, p=2).unsqueeze(1)
-                        label_lst = torch.tensor(label_lst).to(torch.device('cuda:1')).float()
+                        feature_lst_tensor = torch.stack(feature_lst, 0).clone()
+                        feature_lst_tensor = feature_lst_tensor / torch.norm(feature_lst_tensor, dim=1, p=2).unsqueeze(1)
+                        label_lst_tensor = torch.tensor(label_lst).to(torch.device('cuda:1')).float()
 
-                        sim_matrix = torch.matmul(feature_lst, torch.transpose(feature_lst, 0, 1)) / self.tau
-
+                        sim_matrix = torch.matmul(feature_lst_tensor, torch.transpose(feature_lst_tensor, 0, 1)) / self.tau
                         sim_matrix = torch.exp(sim_matrix).to(torch.device('cuda:1'))
-
                         sim_matrix = sim_matrix.clone().fill_diagonal_(0)
-
-                        scores = (sim_matrix * label_lst.unsqueeze(1)).sum(dim=0) / sim_matrix.sum(dim=0)
-
-                        loss_feat_batch = (-label_lst * torch.log(scores)).sum() / label_lst.sum()
+                        scores = (sim_matrix * label_lst_tensor.unsqueeze(1)).sum(dim=0) / sim_matrix.sum(dim=0)
+                        loss_feat_batch = (-label_lst_tensor * torch.log(scores)).sum() / label_lst_tensor.sum()
 
                 if act_count > 0:
                     loss_score_act += loss_score_act_batch / act_count
@@ -504,43 +524,31 @@ class Total_loss_Gai(nn.Module):
         return loss_total, loss
 
 
-def train(net, config, loader_iter, optimizer, criterion, logger, step):
+def train(net, config, batch, optimizer, criterion, logger, step):
     net.train()
-
-    total_loss = {}
-    total_cost = []
-
     optimizer.zero_grad()
 
-    for _b in range(config.batch_size):
+    _, _data, _label, _point_anno, stored_info, _, _, proposal_bbox, proposal_count_by_video, pseudo_instance_label, dynamic_segment_weights_cumsum = batch
 
-        _, _data, _label, _point_anno, stored_info, _, _, proposal_bbox, proposal_count_by_video, pseudo_instance_label, dynamic_segment_weights_cumsum = next(loader_iter)
+    _data = _data.to(torch.device('cuda:1'), non_blocking=True)
+    _label = _label.to(torch.device('cuda:1'), non_blocking=True)
+    _point_anno = _point_anno.to(torch.device('cuda:1'), non_blocking=True)
+    proposal_bbox = proposal_bbox.to(torch.device('cuda:1'), non_blocking=True)
+    pseudo_instance_label = pseudo_instance_label.to(torch.device('cuda:1'), non_blocking=True)
 
-        _data = _data.to(torch.device('cuda:1'))
-        _label = _label.to(torch.device('cuda:1'))
-        _point_anno = _point_anno.to(torch.device('cuda:1'))
-        proposal_bbox = proposal_bbox.to(torch.device('cuda:1'))
-        pseudo_instance_label = pseudo_instance_label.to(torch.device('cuda:1'))
+    # Forward pass
+    vid_score, cas_sigmoid_fuse, features, cls_att, uncertainty = net(_data, vid_labels=_label, proposal_bbox=proposal_bbox, proposal_count_by_video=proposal_count_by_video)
+        
+    # Loss calculation
+    cost, loss = criterion(vid_score, cas_sigmoid_fuse, features, cls_att, stored_info, _label, _point_anno, step, pseudo_instance_label=pseudo_instance_label, uncertainty=uncertainty)
 
-        vid_score, cas_sigmoid_fuse, features, cls_att, uncertainty = net(_data, vid_labels=_label, proposal_bbox=proposal_bbox, proposal_count_by_video=proposal_count_by_video)
-            
-        cost, loss = criterion(vid_score, cas_sigmoid_fuse, features, cls_att, stored_info, _label, _point_anno, step, pseudo_instance_label=pseudo_instance_label, uncertainty=uncertainty)
-
-        total_cost.append(cost)
-
-        for key in loss.keys():
-            if not (key in total_loss):
-                total_loss[key] = []
-
-            if loss[key] > 0:
-                total_loss[key] += [loss[key].detach().cpu().item()]
-            else:
-                total_loss[key] += [loss[key]]
-    
-    total_cost = sum(total_cost) / config.batch_size
-
-    total_cost.backward()
+    # Backward pass and optimization
+    cost.backward()
     optimizer.step()
 
-    for key in total_loss.keys():
-        logger.log_value("loss/" + key, sum(total_loss[key]) / config.batch_size, step)
+    # Logging
+    for key in loss.keys():
+        if loss[key] > 0:
+            logger.log_value("loss/" + key, loss[key].detach().cpu().item(), step)
+        else:
+            logger.log_value("loss/" + key, loss[key], step)

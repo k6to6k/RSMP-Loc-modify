@@ -159,6 +159,61 @@ class Cls_Module(nn.Module):
         return None, cas
 
 
+class ContextPrototypeModulator(nn.Module):
+    """上下文感知的原型调制网络
+    
+    基于当前视频的上下文信息，动态调整原型表示
+    """
+    def __init__(self, feature_dim, hidden_dim=512):
+        super(ContextPrototypeModulator, self).__init__()
+        self.feature_dim = feature_dim
+        
+        # 调制MLP网络
+        self.modulation_network = nn.Sequential(
+            nn.Linear(feature_dim * 2, hidden_dim),
+            nn.ReLU(inplace=True),
+            nn.Linear(hidden_dim, feature_dim),
+            nn.Tanh()  # 使用Tanh限制残差范围在[-1,1]
+        )
+        
+        # 初始化参数
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                torch_init.kaiming_normal_(m.weight)
+                if m.bias is not None:
+                    torch_init.constant_(m.bias, 0)
+                    
+    def forward(self, prototype, context_vector):
+        """根据上下文向量调整原型
+        
+        Args:
+            prototype: 全局原型，形状为[C, D]，C为类别数，D为特征维度
+            context_vector: 上下文向量，形状为[B, D]，B为批次大小
+            
+        Returns:
+            动态调整后的原型，形状为[B, C, D]
+        """
+        B = context_vector.size(0)
+        C = prototype.size(0)
+        D = prototype.size(1)
+        
+        # 扩展维度以进行批处理
+        expanded_prototype = prototype.unsqueeze(0).expand(B, -1, -1)  # [B, C, D]
+        expanded_context = context_vector.unsqueeze(1).expand(-1, C, -1)  # [B, C, D]
+        
+        # 拼接原型和上下文向量
+        concat_features = torch.cat([expanded_prototype, expanded_context], dim=2)  # [B, C, 2D]
+        
+        # 为每个样本的每个类别计算调制残差
+        reshaped_concat = concat_features.view(B * C, -1)  # [B*C, 2D]
+        delta_prototype = self.modulation_network(reshaped_concat).view(B, C, -1)  # [B, C, D]
+        
+        # 生成动态原型 (原型 + 残差)
+        dynamic_prototype = expanded_prototype + delta_prototype
+        
+        return dynamic_prototype
+
+
 class Model(nn.Module):
     def __init__(self, len_feature, num_classes, r_act):
         super(Model, self).__init__()
@@ -196,45 +251,15 @@ class Model(nn.Module):
             mu = torch.einsum('nkt,ntd->nkd', [norm_latent_z, x.float()])
         return mu
 
-    def PredictionModule(self, x, context_vector=None, use_dynamic_prototype=True):
-        """基于动态原型的预测模块
-        
-        Args:
-            x: 特征序列，形状为[B, T, D]
-            context_vector: 上下文向量，形状为[B, D]
-            use_dynamic_prototype: 是否使用动态原型
-        """
+    def PredictionModule(self, x):
         # normalization
         norms_x = calculate_l1_norm(x)
+        norms_ac = calculate_l1_norm(self.ac_center)
+        norms_fg = calculate_l1_norm(self.fg_center)
 
-        # 使用动态原型或静态原型
-        if use_dynamic_prototype and context_vector is not None:
-            # 使用原型记忆库作为全局原型
-            global_prototype = self.prototype_memory if torch.sum(self.prototype_memory) != 0 else self.ac_center
-            
-            # 生成动态原型
-            dynamic_prototypes = self.context_modulator(global_prototype, context_vector)  # [B, C, D]
-            dynamic_prototypes_norm = torch.stack([calculate_l1_norm(p) for p in dynamic_prototypes])  # [B, C, D]
-            
-            # 使用动态原型生成分数
-            B, T, D = x.shape
-            frm_scrs = torch.zeros((B, T, self.num_classes + 1)).to(x.device)
-            
-            # 为每个批次样本计算分数
-            for b in range(B):
-                frm_scrs[b] = torch.einsum('td,cd->tc', [norms_x[b], dynamic_prototypes_norm[b]]) * 20.
-                
-            # 分离动作类别和背景类别
-            norms_fg = calculate_l1_norm(dynamic_prototypes[:, -1].unsqueeze(1))  # [B, 1, D]
-            frm_fb_scrs = torch.einsum('btd,bkd->btk', [norms_x, norms_fg]).squeeze(-1) * 20.
-        else:
-            # 使用静态原型
-            norms_ac = calculate_l1_norm(self.ac_center)
-            norms_fg = calculate_l1_norm(self.fg_center)
-            
-            # 生成类别分数
-            frm_scrs = torch.einsum('ntd,cd->ntc', [norms_x, norms_ac]) * 20.
-            frm_fb_scrs = torch.einsum('ntd,kd->ntk', [norms_x, norms_fg]).squeeze(-1) * 20.
+        # generate class scores
+        frm_scrs = torch.einsum('ntd,cd->ntc', [norms_x, norms_ac]) * 20.
+        frm_fb_scrs = torch.einsum('ntd,kd->ntk', [norms_x, norms_fg]).squeeze(-1) * 20.
 
         # generate attention
         class_agno_att = self.sigmoid(frm_fb_scrs)
@@ -249,30 +274,15 @@ class Model(nn.Module):
         norms_ca_vid_feat = calculate_l1_norm(ca_vid_feat)
         norms_cw_vid_feat = calculate_l1_norm(cw_vid_feat)
 
-        # classification with dynamic prototypes
-        if use_dynamic_prototype and context_vector is not None:
-            # 使用动态原型进行视频级分类
-            B = context_vector.size(0)
-            ca_vid_scr = torch.zeros((B, self.num_classes + 1)).to(x.device)
-            cw_vid_scr = torch.zeros((B, self.num_classes + 1)).to(x.device)
-            
-            for b in range(B):
-                ca_vid_scr[b] = torch.einsum('d,cd->c', [norms_ca_vid_feat[b], dynamic_prototypes_norm[b]]) * 20.
-                cw_vid_scr[b] = torch.einsum('cd,cd->c', [norms_cw_vid_feat[b], dynamic_prototypes_norm[b]]) * 20.
-        else:
-            # 使用静态原型进行视频级分类
-            frm_scr = torch.einsum('ntd,cd->ntc', [norms_x, norms_ac]) * 20.
-            ca_vid_scr = torch.einsum('nd,cd->nc', [norms_ca_vid_feat, norms_ac]) * 20.
-            cw_vid_scr = torch.einsum('ncd,cd->nc', [norms_cw_vid_feat, norms_ac]) * 20.
+        # classification
+        frm_scr = torch.einsum('ntd,cd->ntc', [norms_x, norms_ac]) * 20.
+        ca_vid_scr = torch.einsum('nd,cd->nc', [norms_ca_vid_feat, norms_ac]) * 20.
+        cw_vid_scr = torch.einsum('ncd,cd->nc', [norms_cw_vid_feat, norms_ac]) * 20.
 
         # prediction
         ca_vid_pred = F.softmax(ca_vid_scr, -1)
         cw_vid_pred = F.softmax(cw_vid_scr, -1)
-        
-        # 确保frm_scr在所有条件分支中都有定义
-        if use_dynamic_prototype and context_vector is not None and 'frm_scr' not in locals():
-            frm_scr = frm_scrs
-            
+
         return ca_vid_pred, cw_vid_pred, class_agno_att, frm_scr
 
     # 原来的前往传播
@@ -328,61 +338,6 @@ class Model(nn.Module):
         m_vid_ca_pred, m_vid_cw_pred, m_att, m_frm_pred = self.PredictionModule(reallocated_feat)
 
         return [vid_score, r_vid_score], [cas_sigmoid_fuse, r_cas_sigmoid_fuse], features, [o_vid_ca_pred, m_vid_ca_pred, o_vid_cw_pred, m_vid_cw_pred, o_att, m_att, o_frm_pred, m_frm_pred], None
-
-
-class ContextPrototypeModulator(nn.Module):
-    """上下文感知的原型调制网络
-    
-    基于当前视频的上下文信息，动态调整原型表示
-    """
-    def __init__(self, feature_dim, hidden_dim=512):
-        super(ContextPrototypeModulator, self).__init__()
-        self.feature_dim = feature_dim
-        
-        # 调制MLP网络
-        self.modulation_network = nn.Sequential(
-            nn.Linear(feature_dim * 2, hidden_dim),
-            nn.ReLU(inplace=True),
-            nn.Linear(hidden_dim, feature_dim),
-            nn.Tanh()  # 使用Tanh限制残差范围在[-1,1]
-        )
-        
-        # 初始化参数
-        for m in self.modules():
-            if isinstance(m, nn.Linear):
-                torch_init.kaiming_normal_(m.weight)
-                if m.bias is not None:
-                    torch_init.constant_(m.bias, 0)
-                    
-    def forward(self, prototype, context_vector):
-        """根据上下文向量调整原型
-        
-        Args:
-            prototype: 全局原型，形状为[C, D]，C为类别数，D为特征维度
-            context_vector: 上下文向量，形状为[B, D]，B为批次大小
-            
-        Returns:
-            动态调整后的原型，形状为[B, C, D]
-        """
-        B = context_vector.size(0)
-        C = prototype.size(0)
-        D = prototype.size(1)
-        
-        # 扩展维度以进行批处理
-        expanded_prototype = prototype.unsqueeze(0).expand(B, -1, -1)  # [B, C, D]
-        expanded_context = context_vector.unsqueeze(1).expand(-1, C, -1)  # [B, C, D]
-        
-        # 拼接原型和上下文向量
-        concat_features = torch.cat([expanded_prototype, expanded_context], dim=2)  # [B, C, 2D]
-        
-        # 为每个样本的每个类别计算调制残差
-        reshaped_concat = concat_features.view(B * C, -1)  # [B*C, 2D]
-        delta_prototype = self.modulation_network(reshaped_concat).view(B, C, -1)  # [B, C, D]
-        
-        # 生成动态原型 (原型 + 残差)
-        dynamic_prototype = expanded_prototype + delta_prototype
-        
-        return dynamic_prototype
 
 
 class Model_GAI(nn.Module):
@@ -496,7 +451,7 @@ class Model_GAI(nn.Module):
         """
         # normalization
         norms_x = calculate_l1_norm(x)
-
+        
         # 使用动态原型或静态原型
         if use_dynamic_prototype and context_vector is not None:
             # 使用原型记忆库作为全局原型
@@ -549,6 +504,9 @@ class Model_GAI(nn.Module):
             for b in range(B):
                 ca_vid_scr[b] = torch.einsum('d,cd->c', [norms_ca_vid_feat[b], dynamic_prototypes_norm[b]]) * 20.
                 cw_vid_scr[b] = torch.einsum('cd,cd->c', [norms_cw_vid_feat[b], dynamic_prototypes_norm[b]]) * 20.
+            
+            # 动态原型模式下，使用frm_scrs作为frm_scr
+            frm_scr = frm_scrs
         else:
             # 使用静态原型进行视频级分类
             frm_scr = torch.einsum('ntd,cd->ntc', [norms_x, norms_ac]) * 20.
@@ -558,11 +516,7 @@ class Model_GAI(nn.Module):
         # prediction
         ca_vid_pred = F.softmax(ca_vid_scr, -1)
         cw_vid_pred = F.softmax(cw_vid_scr, -1)
-        
-        # 确保frm_scr在所有条件分支中都有定义
-        if use_dynamic_prototype and context_vector is not None and 'frm_scr' not in locals():
-            frm_scr = frm_scrs
-            
+
         return ca_vid_pred, cw_vid_pred, class_agno_att, frm_scr
 
     # 带有上下文感知动态原型的前向传播
@@ -664,3 +618,4 @@ def random_walk(x, y, w):
     refined_x = (1 - w) * torch.einsum('ntk,nkd->ntd', [mat_inv_x, y2x_sum_x])
 
     return refined_x
+

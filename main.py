@@ -106,7 +106,7 @@ def generate_pseudo_segment(config, net, test_loader, step):
                 
                 # 将标注点信息传递给get_proposal_oic函数
                 proposals = utils.get_proposal_oic(seg_list, cas_temp, pred, score_np, t_factor, 
-                                                   dynamic_segment_weights_cumsum=dynamic_segment_weights_cumsum[0], 
+                                                   dynamic_segment_weights_cumsum=dynamic_segment_weights_cumsum[0] if dynamic_segment_weights_cumsum is not None else None, 
                                                    vid_duration=vid_duration,
                                                    point_annotations=point_annotations)
 
@@ -132,13 +132,10 @@ def generate_pseudo_segment(config, net, test_loader, step):
                 for c in range(len(pred)):
                     pos = np.where(agnostic_score_np_temp[:, c, 0] > 0)
                     seg_list.append(pos)
-
-                # proposals = utils.get_proposal_oic(seg_list, cas_temp, score_np, pred, config.scale, \
-                #                                    vid_num_seg, config.feature_fps, num_segments)
                 
                 # 使用相同的点标注信息
                 proposals = utils.get_proposal_oic(seg_list, cas_temp, pred, score_np, t_factor,
-                                                   dynamic_segment_weights_cumsum=dynamic_segment_weights_cumsum[0],
+                                                   dynamic_segment_weights_cumsum=dynamic_segment_weights_cumsum[0] if dynamic_segment_weights_cumsum is not None else None,
                                                    vid_duration=vid_duration,
                                                    point_annotations=point_annotations)
 
@@ -173,9 +170,6 @@ def generate_pseudo_segment(config, net, test_loader, step):
                                        subset='train', tiou_thresholds=tIoU_thresh,
                                        verbose=False, check_status=False)
         mAP, _ = anet_detection.evaluate()
-
-        # for i in range(tIoU_thresh.shape[0]):
-        #     print('acc/mAP@{:.1f}: {:.3f}'.format(tIoU_thresh[i], mAP[i]))
 
 
         return final_res
@@ -339,19 +333,22 @@ if __name__ == "__main__":
     criterion = criterion_list[step_iter]
     train_loader = data.DataLoader(
         train_dataset_list[step_iter],
-        batch_size=1, collate_fn=my_collate_fn,
+        batch_size=config.batch_size, collate_fn=my_collate_fn,
         shuffle=True, num_workers=config.num_workers,
-        worker_init_fn=worker_init_fn)
+        worker_init_fn=worker_init_fn if config.num_workers > 0 else None,
+        pin_memory=config.num_workers > 0)  # 当num_workers=0时不需要pin_memory
     test_loader = data.DataLoader(
         test_dataset_list[step_iter],
         batch_size=1, collate_fn=my_collate_fn,
         shuffle=True, num_workers=config.num_workers,
-        worker_init_fn=worker_init_fn)
+        worker_init_fn=worker_init_fn,
+        pin_memory=True)
     full_loader = data.DataLoader(
         full_dataset_list[step_iter],
         batch_size=1, collate_fn=my_collate_fn,
         shuffle=True, num_workers=config.num_workers,
-        worker_init_fn=worker_init_fn)
+        worker_init_fn=worker_init_fn,
+        pin_memory=True)
     print(net, flush=True)
 
     # final_res = {}
@@ -359,6 +356,7 @@ if __name__ == "__main__":
     # final_res['results'] = {}
     # final_res['external_data'] = {'used': True, 'details': 'Features from I3D Network'}
 
+    loader_iter = iter(train_loader)
     for step in tqdm(
             range(0, config.num_iters),
             total=config.num_iters,
@@ -377,49 +375,54 @@ if __name__ == "__main__":
                     shuffle=True, num_workers=config.num_workers,
                     worker_init_fn=worker_init_fn)
                 pseudo_segment_dict = generate_pseudo_segment(config, net, train_loader_pseudo, step=step_iter)
-                # pseudo_segment_dict = final_res
                 # generate dynamic segment weights according to the predicted pseudo_segment_dict
                 generate_dynamic_segment_weights(config, pseudo_segment_dict, step=step_iter)
                 # pass the generated pseudo_segment_dict into the dataset class to generate the proposal bounding box and pseudo label
                 train_dataset_list[step_iter].get_proposals(pseudo_segment_dict)
-                # test_dataset_list[step_iter].get_proposals(pseudo_segment_dict)
-                # full_dataset_list[step_iter].get_proposals(pseudo_segment_dict)
 
                 train_loader = data.DataLoader(
                     train_dataset_list[step_iter],
-                    batch_size=1, collate_fn=my_collate_fn,
+                    batch_size=config.batch_size, collate_fn=my_collate_fn, # <-- 使用真实的批处理
                     shuffle=True, num_workers=config.num_workers,
-                    worker_init_fn=worker_init_fn)
+                    worker_init_fn=worker_init_fn if config.num_workers > 0 else None,
+                    pin_memory=config.num_workers > 0)  # 当num_workers=0时不需要pin_memory
                 test_loader = data.DataLoader(
                     test_dataset_list[step_iter],
                     batch_size=1, collate_fn=my_collate_fn,
                     shuffle=True, num_workers=config.num_workers,
-                    worker_init_fn=worker_init_fn)
+                    worker_init_fn=worker_init_fn if config.num_workers > 0 else None,
+                    pin_memory=config.num_workers > 0)  # 当num_workers=0时不需要pin_memory
                 full_loader = data.DataLoader(
                     full_dataset_list[step_iter],
                     batch_size=1, collate_fn=my_collate_fn,
                     shuffle=True, num_workers=config.num_workers,
-                    worker_init_fn=worker_init_fn)
+                    worker_init_fn=worker_init_fn if config.num_workers > 0 else None,
+                    pin_memory=config.num_workers > 0)  # 当num_workers=0时不需要pin_memory
             net = model_list[step_iter]
             optimizer = optimizer_list[step_iter]
             criterion = criterion_list[step_iter]
+            loader_iter = iter(train_loader)
             print(net, flush=True)
 
         if step > 0 and config.lr[step] != config.lr[step - 1]:
             for param_group in optimizer.param_groups:
                 param_group["lr"] = config.lr[step]
-        if step % (len(train_loader) // config.batch_size) == 0:
+        
+        try:
+            batch = next(loader_iter)
+        except StopIteration:
             loader_iter = iter(train_loader)
+            batch = next(loader_iter)
 
-        train(net, config, loader_iter, optimizer, criterion, logger, step)
+        train(net, config, batch, optimizer, criterion, logger, step)
 
         if (step+1) % config.search_freq == 0:
             optimal_sequence_search(net, config, logger, train_loader)
 
-        if (step+1) % 20 == 0:
+        # 减少评估频率，加快训练
+        if (step+1) % 50 == 0:
             test_res = test(net, config, logger, test_loader, test_info, step, step_iter)
             if test_info["average_mAP[0.1:0.7]"][-1] > best_mAP:
-                # final_res = test_res
                 best_mAP = test_info["average_mAP[0.1:0.7]"][-1]
 
                 utils.save_best_record_thumos(test_info,

@@ -12,14 +12,17 @@ def parse_args():
     parser.add_argument('--log_path', type=str, default='./logs/RSMP')
     parser.add_argument('--modal', type=str, default='all', choices=['rgb', 'flow', 'all'])
     parser.add_argument('--lambdas', type=str, default='[1,0.5,1,1,1]')
-    parser.add_argument('--search_freq', type=int, default=10, help='the frequency of optimal sequence search')
+    # parser.add_argument('--search_freq', type=int, default=10, help='the frequency of optimal sequence search')
+    parser.add_argument('--search_freq', type=int, default=30, help='the frequency of optimal sequence search')  # 减少搜索频率以提高性能
     parser.add_argument('--budget', type=int, default=25, help='the budget size of optimal sequence search')
     parser.add_argument('--r_act', type=int, default=8)
     parser.add_argument('--class_th', type=float, default=0.5)
     # parser.add_argument('--lr', type=str, default='[0.0001]*8000', help='learning rates for steps (list form)')
-    parser.add_argument('--lr', type=str, default='[0.0001]*350', help='learning rates for steps (list form)')
+    parser.add_argument('--lr', type=str, default='[0.0004]*200', help='learning rates for steps (list form)')  # 增大学习率以加快收敛
+    # parser.add_argument('--batch_size', type=int, default=16) # 降低批处理大小以减少显存消耗
     parser.add_argument('--batch_size', type=int, default=16)
-    parser.add_argument('--num_workers', type=int, default=2)
+    # parser.add_argument('--num_workers', type=int, default=2)
+    parser.add_argument('--num_workers', type=int, default=0)  # 设置为0以彻底解决ConnectionResetError
     parser.add_argument('--seed', type=int, default=-1, help='random seed (-1 for no manual seed)')
     parser.add_argument('--model_file', type=str, default='./models/RSMP/model_seed_-1_Iter_2.pkl', help='the path of pre-trained model file')
     parser.add_argument('--debug', action='store_true')
@@ -27,6 +30,8 @@ def parse_args():
     # --------------------------------------
     parser.add_argument('--num_step', type=int, default=3)
 
+    # 添加
+    parser.add_argument('--pin_memory', action='store_true')
 
     return init_args(parser.parse_args())
 

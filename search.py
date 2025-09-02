@@ -41,8 +41,11 @@ def optimal_sequence_search(net, config, logger, train_loader):
             act_seed_lst[_index[0]] = act_seed[0].detach().cpu()
             bkg_seed_lst[_index[0]] = bkg_seed[0].detach().cpu()
 
-        # Parallel对象会创建一个进程池，以便在多进程中执行每一个列表项。函数delayed是一个创建元组(function, args, kwargs)的简单技巧。
-        res = Parallel(n_jobs=16)(delayed(greedy_search_with_id)(config.budget, cas, act_seed, bkg_seed) for (cas, act_seed, bkg_seed) in zip(cas_lst, act_seed_lst, bkg_seed_lst))
+        # 减少并行任务数量，避免过度占用CPU资源
+        # 适配可用的CPU核心数
+        import os
+        cpu_count = max(os.cpu_count() - 2, 4)  # 保留至少2个核心给系统和其他任务
+        res = Parallel(n_jobs=cpu_count, prefer="threads")(delayed(greedy_search_with_id)(config.budget, cas, act_seed, bkg_seed) for (cas, act_seed, bkg_seed) in zip(cas_lst, act_seed_lst, bkg_seed_lst))
         
         pseudo_labels, sequence_score = zip(*res)
 

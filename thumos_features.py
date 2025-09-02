@@ -15,6 +15,7 @@ from collections import defaultdict
 # from torch._six import string_classes
 import collections.abc as container_abcs
 from scipy import interpolate
+import torch.nn.utils.rnn as rnn_utils
 
 int_classes = int
 string_classes = str
@@ -329,50 +330,41 @@ class ThumosFeature(data.Dataset):
         return samples.astype(int)
 
 def my_collate_fn(batch):
-    r"""Puts each data field into a tensor with outer dimension batch size"""
-    elem = batch[0]
-    elem_type = type(elem)
-    if isinstance(elem, torch.Tensor):
-        out = None
-        if torch.utils.data.get_worker_info() is not None:
-            # If we're in a background process, concatenate directly into a
-            # shared memory tensor to avoid an extra copy
-            numel = sum([x.numel() for x in batch])
-            storage = elem.storage()._new_shared(numel)
-            out = elem.new(storage)
-        return torch.stack(batch, 0, out=out)
-    elif elem_type.__module__ == 'numpy' and elem_type.__name__ != 'str_' \
-            and elem_type.__name__ != 'string_':
-        if elem_type.__name__ == 'ndarray' or elem_type.__name__ == 'memmap':
-            # array of string classes and object
-            if np_str_obj_array_pattern.search(elem.dtype.str) is not None:
-                raise TypeError(default_collate_err_msg_format.format(elem.dtype))
+    # 过滤掉None的样本
+    batch = [b for b in batch if b is not None]
+    if not batch:
+        return (None,) * 11
 
-            return my_collate_fn([torch.as_tensor(b) for b in batch])
-        elif elem.shape == ():  # scalars
-            return torch.as_tensor(batch)
-    elif isinstance(elem, float):
-        return torch.tensor(batch, dtype=torch.float64)
-    elif isinstance(elem, int_classes):
-        return torch.tensor(batch)
-    elif isinstance(elem, string_classes):
-        return batch
-    elif isinstance(elem, container_abcs.Mapping):
-        return {key: my_collate_fn([d[key] for d in batch]) for key in elem}
-    elif isinstance(elem, tuple) and hasattr(elem, '_fields'):  # namedtuple
-        return elem_type(*(my_collate_fn(samples) for samples in zip(*batch)))
-    elif isinstance(elem, container_abcs.Sequence):
-        # check to make sure that the elements in batch have consistent size
-        it = iter(batch)
-        elem_size = len(next(it))
-        if not all(len(elem) == elem_size for elem in it):
-            raise RuntimeError('each element in list of batch should be of equal size')
-        transposed = zip(*batch)
-        return [my_collate_fn(samples) for samples in transposed]
-    else:
-        return batch
-
-    # raise TypeError(default_collate_err_msg_format.format(elem_type))
+    # 将批次数据从 list of tuples 转置为 tuple of lists
+    transposed = list(zip(*batch))
+    
+    collated_batch = []
+    for samples in transposed:
+        elem_type = type(samples[0])
+        
+        if isinstance(samples[0], torch.Tensor):
+            # 使用pad_sequence进行填充
+            collated_batch.append(rnn_utils.pad_sequence(samples, batch_first=True, padding_value=0))
+        elif isinstance(samples[0], np.ndarray):
+            # 对于numpy array，先转换为Tensor，再进行常规处理
+            try:
+                collated_batch.append(torch.utils.data.dataloader.default_collate([torch.from_numpy(s) for s in samples]))
+            except:
+                collated_batch.append(samples) # 如果转换失败，返回原始列表
+        elif isinstance(samples[0], (int, float, str)):
+            collated_batch.append(torch.utils.data.dataloader.default_collate(samples))
+        elif isinstance(samples[0], dict):
+            # 对于dict类型，将其合并
+            keys = samples[0].keys()
+            collated_dict = {key: [d[key] for d in samples] for key in keys}
+            collated_batch.append(collated_dict)
+        elif samples[0] is None:
+            collated_batch.append(None)
+        else:
+            # 对于其他类型（如list, dict），直接保留为list
+            collated_batch.append(list(samples))
+            
+    return tuple(collated_batch)
 
 default_collate_err_msg_format = (
     "default_collate: batch must contain tensors, numpy arrays, numbers, "
