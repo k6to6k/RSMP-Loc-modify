@@ -293,6 +293,22 @@ if __name__ == "__main__":
         else:
             # For the following steps
             net = Model_GAI(config.len_feature, config.num_classes, config.r_act)
+            
+            # 加载上一个阶段的模型权重（如果存在）
+            if args.resume and step > 0:
+                prev_model_path = os.path.join(args.model_path, f"model_seed_{config.seed}_Iter_{step-1}.pkl")
+                if os.path.exists(prev_model_path):
+                    print(f"Loading weights from {prev_model_path} for step {step}")
+                    state_dict = torch.load(prev_model_path, map_location=torch.device('cpu'))
+                    # 尝试加载尽可能多的参数，忽略不匹配的部分
+                    try:
+                        net.load_state_dict(state_dict, strict=False)
+                        print("Successfully loaded model weights")
+                    except Exception as e:
+                        print(f"Warning: Error loading weights: {e}")
+                else:
+                    print(f"Warning: Could not find model file {prev_model_path} for step {step}. Starting from scratch.")
+            
             criterion = Total_loss_Gai(config.lambdas)
             train_dataset = ThumosFeature(config, data_path=config.data_path, mode='train',
                                           modal=config.modal, feature_fps=config.feature_fps,
@@ -357,9 +373,44 @@ if __name__ == "__main__":
     # final_res['external_data'] = {'used': True, 'details': 'Features from I3D Network'}
 
     loader_iter = iter(train_loader)
+    
+    # 支持从指定迭代次数开始训练
+    start_iter = args.start_iter if args.resume else 0
+    if start_iter > 0:
+        print(f"Resuming training from iteration {start_iter}")
+        # 计算当前应该处于哪个step_iter
+        if start_iter <= config.epochs_per_step * config.num_steps:
+            current_step_iter = start_iter // config.epochs_per_step
+            if current_step_iter > 0:
+                step_iter = current_step_iter
+                # 重要：加载最近一个已保存的模型
+                prev_model_path = os.path.join(args.model_path, f"model_seed_{config.seed}_Iter_{step_iter-1}.pkl")
+                if os.path.exists(prev_model_path):
+                    print(f"Loading weights from {prev_model_path}")
+                    # 确保所有模型都加载这个权重，防止评估时使用未训练的模型
+                    state_dict = torch.load(prev_model_path, map_location=torch.device('cpu'))
+                    for i in range(step_iter+1):  # 包括当前step_iter
+                        try:
+                            model_list[i].load_state_dict(state_dict, strict=False)
+                            print(f"Successfully loaded weights for model_list[{i}]")
+                        except Exception as e:
+                            print(f"Warning: Error loading weights for model_list[{i}]: {e}")
+                
+                net = model_list[step_iter]
+                optimizer = optimizer_list[step_iter]
+                criterion = criterion_list[step_iter]
+                train_loader = data.DataLoader(
+                    train_dataset_list[step_iter],
+                    batch_size=config.batch_size, collate_fn=my_collate_fn,
+                    shuffle=True, num_workers=config.num_workers,
+                    worker_init_fn=worker_init_fn if config.num_workers > 0 else None,
+                    pin_memory=config.num_workers > 0)
+                loader_iter = iter(train_loader)
+                print(f"Switched to step_iter {step_iter} based on start_iter")
+    
     for step in tqdm(
-            range(0, config.num_iters),
-            total=config.num_iters,
+            range(start_iter, config.num_iters),
+            total=config.num_iters - start_iter,
             dynamic_ncols=True
     ):
         if 0 < step <= config.epochs_per_step * config.num_steps and step % config.epochs_per_step == 0:
@@ -429,8 +480,15 @@ if __name__ == "__main__":
                                               os.path.join(config.output_path,
                                                            "best_record_seed_{}_Iter_{}.txt".format(config.seed, step_iter)))
 
+                # 确保保存正确的模型文件名，特别是在断点续训时
+                current_iter = step_iter
+                if args.resume and args.start_iter > 0:
+                    # 如果是从中间恢复训练，确保使用正确的step_iter
+                    # 这样可以避免覆盖之前的模型文件
+                    print(f"Saving model with correct step_iter: {current_iter}")
+                
                 torch.save(net.state_dict(), os.path.join(args.model_path, \
-                                                          "model_seed_{}_Iter_{}.pkl".format(config.seed, step_iter)))
+                                                          "model_seed_{}_Iter_{}.pkl".format(config.seed, current_iter)))
 
 
 

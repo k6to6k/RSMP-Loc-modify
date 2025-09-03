@@ -18,7 +18,7 @@ def parse_args():
     parser.add_argument('--r_act', type=int, default=8)
     parser.add_argument('--class_th', type=float, default=0.5)
     # parser.add_argument('--lr', type=str, default='[0.0001]*8000', help='learning rates for steps (list form)')
-    parser.add_argument('--lr', type=str, default='[0.0004]*200', help='learning rates for steps (list form)')  # 增大学习率以加快收敛
+    parser.add_argument('--lr', type=str, default='[0.0004]*300+[0.0002]*300+[0.0001]*300', help='learning rates for steps (list form)')  # 增大学习率以加快收敛
     # parser.add_argument('--batch_size', type=int, default=16) # 降低批处理大小以减少显存消耗
     parser.add_argument('--batch_size', type=int, default=16)
     # parser.add_argument('--num_workers', type=int, default=2)
@@ -32,6 +32,8 @@ def parse_args():
 
     # 添加
     parser.add_argument('--pin_memory', action='store_true')
+    parser.add_argument('--resume', action='store_true', help='resume training from saved model')
+    parser.add_argument('--start_iter', type=int, default=0, help='start iteration for resumed training')
 
     return init_args(parser.parse_args())
 

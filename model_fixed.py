@@ -619,3 +619,5 @@ def random_walk(x, y, w):
 
     return refined_x
 
+
+

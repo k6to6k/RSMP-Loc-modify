@@ -36,8 +36,7 @@ if __name__ == "__main__":
             collate_fn=my_collate_fn,
             batch_size=1,
             shuffle=False, num_workers=config.num_workers,
-            worker_init_fn=worker_init_fn,
-            pin_memory=True)
+            worker_init_fn=worker_init_fn)
 
     test_info = {"iter": [], "step": [], "test_acc": [],
                 "average_mAP[0.1:0.7]": [], "average_mAP[0.1:0.5]": [], "average_mAP[0.3:0.7]": [],
